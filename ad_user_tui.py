@@ -337,10 +337,11 @@ class ADUserApp(App):
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
 
-    def __init__(self, record, json_encoder, directory=None, preferences_path=None, tls_verified=True):
+    def __init__(self, record, json_encoder, directory=None, preferences_path=None, tls_verified=True, use_ssl=True):
         super().__init__()
         self.directory = directory
         self.tls_verified = tls_verified
+        self.use_ssl = use_ssl
         self.json_encoder = json_encoder
         self.preferences_path = (
             Path(preferences_path) if preferences_path is not None
@@ -456,9 +457,13 @@ class ADUserApp(App):
             if table.row_count:
                 table.move_cursor(row=0)
         disabled_status = " | Disabled account" if self.disabled_user else ""
+        transport_status = (
+            f"TLS certificate validation {'ON' if self.tls_verified else 'OFF'}"
+            if self.use_ssl else "LDAP UNENCRYPTED"
+        )
         self.main_screen.query_one("#status", Static).update(
             f"{len(self.visible_names)} / {len(self.attributes)} attributes{disabled_status}"
-            f" | Read-only | TLS certificate validation {'ON' if self.tls_verified else 'OFF'}"
+            f" | Read-only | {transport_status}"
         )
 
     def on_input_changed(self, event: Input.Changed):

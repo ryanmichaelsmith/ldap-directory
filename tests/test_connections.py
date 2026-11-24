@@ -36,6 +36,17 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             load_profiles(self.path, self.legacy)
 
+    def test_existing_profiles_default_to_ldaps_and_invalid_transport_is_rejected(self):
+        profile = {"server": "dc.example.com", "bind_user": "user", "tls_verified": True,
+                   "credential_key": "profile:example", "password_stored": False}
+        self.path.write_text(json.dumps({"profiles": {"Example": profile}, "selected": "Example"}))
+        loaded, _ = load_profiles(self.path, self.legacy)
+        self.assertTrue(loaded["Example"].get("use_ssl", True))
+        profile["use_ssl"] = "false"
+        self.path.write_text(json.dumps({"profiles": {"Example": profile}, "selected": "Example"}))
+        with self.assertRaisesRegex(RuntimeError, "Invalid connection profile"):
+            load_profiles(self.path, self.legacy)
+
     def test_profile_cli_uses_its_own_credential_key(self):
         profile = {"server": "dc.example.com", "bind_user": "user", "tls_verified": True,
                    "credential_key": "profile:example", "password_stored": True}
@@ -70,6 +81,20 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn("legacy_credential_key", saved)
         self.assertTrue(saved["password_stored"])
 
+    def test_named_unencrypted_profile_warns_and_uses_plaintext(self):
+        profile = {"server": "dc.example.com", "bind_user": "user", "tls_verified": True,
+                   "use_ssl": False, "credential_key": "profile:example", "password_stored": True}
+        connection, directory = Mock(bound=True), Mock()
+        with patch("sys.argv", ["ad_user_ldap.py", "target", "--json", "--connection", "Plain",
+                                "--use-stored-credentials"]), \
+             patch.object(cli, "load_profiles", return_value=({"Plain": profile}, "Plain")), \
+             patch.object(cli, "stored_password", return_value="not-a-real-password"), \
+             patch.object(cli, "open_directory", return_value=(connection, directory, {"dn": "test"})) as opened, \
+             patch("sys.stdout"), patch("sys.stderr") as stderr:
+            self.assertEqual(cli.main(), 0)
+        self.assertFalse(opened.call_args.kwargs["use_ssl"])
+        self.assertIn("unencrypted", "".join(call.args[0] for call in stderr.write.call_args_list))
+
     def test_browser_connection_shortcut_switches_or_resumes(self):
         old_connection = Mock(bound=True)
         new_connection = Mock(bound=True)
@@ -83,8 +108,8 @@ class ProfileTests(unittest.TestCase):
         with patch("sys.argv", ["ad_user_ldap.py"]), patch("sys.stdin") as stdin, \
              patch("sys.stdout") as stdout, \
              patch.object(cli, "connection_dialog", side_effect=[
-                 (old_connection, old_directory, old_record, True), None,
-                 (new_connection, new_directory, new_record, False),
+                 (old_connection, old_directory, old_record, True, True), None,
+                 (new_connection, new_directory, new_record, False, False),
              ]) as dialog, \
              patch("ad_user_tui.ADUserApp", side_effect=[first, resumed, switched]) as browser:
             stdin.isatty.return_value = stdout.isatty.return_value = True
@@ -94,6 +119,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(browser.call_args_list[1].args[0], current_record)
         self.assertEqual(browser.call_args_list[2].args[0], new_record)
         self.assertFalse(browser.call_args_list[2].kwargs["tls_verified"])
+        self.assertFalse(browser.call_args_list[2].kwargs["use_ssl"])
         old_directory.close.assert_called_once()
         new_directory.close.assert_called_once()
 
@@ -208,7 +234,7 @@ class ConnectionDialogTests(unittest.IsolatedAsyncioTestCase):
             self.app.query_one("#connect").press()
             await pilot.pause()
             await asyncio.wait_for(self.app.workers.wait_for_complete(), 5)
-        self.assertEqual(self.app.return_value, ("conn", "directory", {"dn": "test"}, True))
+        self.assertEqual(self.app.return_value, ("conn", "directory", {"dn": "test"}, True, True))
 
     async def test_changing_server_resets_tls_and_stored_identity(self):
         async with self.app.run_test(size=(100, 40)) as pilot:
@@ -243,6 +269,47 @@ class ConnectionDialogTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertFalse(self.app.query_one("#verified", Checkbox).value)
             self.assertIn("not verified", str(self.app.query_one("#tls-warning", Static).render()))
+
+    async def test_unencrypted_connection_requires_confirmation(self):
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            await self.fill(pilot, "Plain", "dc.example.com", "user", "secret")
+            self.app.query_one("#transport", Select).value = "ldap"
+            self.app.query_one("#remember", Checkbox).value = True
+            await pilot.pause()
+            self.assertTrue(self.app.query_one("#verified", Checkbox).disabled)
+            self.assertIn("plaintext", str(self.app.query_one("#tls-warning", Static).render()))
+            self.app.query_one("#connect").press()
+            await pilot.pause()
+            self.app.screen.query_one("#cancel").press()
+            await pilot.pause()
+            self.connect.assert_not_called()
+            self.assertFalse(self.path.exists())
+            self.assertEqual(self.saved, {})
+            self.app.query_one("#connect").press()
+            await pilot.pause()
+            self.app.screen.query_one("#confirm").press()
+            await pilot.pause()
+            await asyncio.wait_for(self.app.workers.wait_for_complete(), 5)
+        self.assertFalse(self.connect.call_args.args[0]["use_ssl"])
+        self.assertFalse(load_profiles(self.path, self.legacy)[0]["Plain"]["use_ssl"])
+        self.assertFalse(self.app.return_value[-1])
+
+    async def test_changing_server_resets_unencrypted_protocol(self):
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            await self.fill(pilot, "Plain", "old.example.com", "user", "")
+            self.app.query_one("#transport", Select).value = "ldap"
+            self.app.query_one("#save").press()
+            await pilot.pause()
+            self.assertFalse(self.app.profiles["Plain"]["use_ssl"])
+            self.app.query_one("#profiles", Select).value = ""
+            await pilot.pause()
+            self.app.query_one("#profiles", Select).value = "Plain"
+            await pilot.pause()
+            self.assertEqual(self.app.query_one("#transport", Select).value, "ldap")
+            self.app.query_one("#server", Input).value = "new.example.com"
+            await pilot.pause()
+            self.assertEqual(self.app.query_one("#transport", Select).value, "ldaps")
+            self.assertTrue(self.app.query_one("#verified", Checkbox).value)
 
     async def test_forget_password_and_delete_profile_require_confirmation(self):
         async with self.app.run_test(size=(100, 40)) as pilot:

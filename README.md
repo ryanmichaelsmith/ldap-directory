@@ -2,25 +2,44 @@
 
 A read-only LDAP browser for users, groups, computers, domains, organizational units (OUs),
 and containers in Active Directory. It connects to a configurable LDAP server
-over LDAPS on port 636. **There is no default server or bind account.**
+over LDAPS on port 636 by default, or unencrypted LDAP on port 389 if explicitly
+selected. **There is no default server or bind account.**
 
 TLS certificate and hostname verification is **enabled by default**. Use a
 server hostname matching a certificate trusted by Python's system trust store.
 
 ## Setup
 
-Create a virtual environment and install dependencies. In Bash on macOS:
+### macOS and Linux
+
+Create a virtual environment and install dependencies in Bash:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
+On Linux, use the password prompt or a private password file; native password
+storage is currently supported only on macOS and Windows.
+
+### Windows
+
+Create a virtual environment and install dependencies in PowerShell:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+### Configure a connection
+
 Launch the connection dialog:
 
 ```bash
 .venv/bin/python ad_user_ldap.py
 ```
+
+On Windows, use `.\.venv\Scripts\python.exe ad_user_ldap.py` instead.
 
 Enter a connection name, server, bind identity (`DOMAIN\ACCOUNT` or a UPN), and
 password. Choose **Connect** to save the profile and connect, or **Save** to
@@ -37,10 +56,14 @@ password; use **Forget password** first if you also want to remove it. Changing
 the server or bind user assigns a separate credential; it does not delete the
 old stored password.
 
-TLS verification is on by default. Unchecking **Verify TLS certificate and
-hostname** exposes bind credentials to server impersonation; use it only if
-you accept that risk. Changing the server turns verification back on. Profiles
-are saved in `~/.config/ad-directory/connections.json`, without passwords.
+LDAPS and TLS verification are on by default. Unchecking **Verify TLS
+certificate and hostname** exposes bind credentials to server impersonation.
+Selecting **LDAP (no TLS, port 389)** sends the password and directory data
+unencrypted and requires confirmation before connecting. Use these options
+only if you accept their risks. Some Active Directory servers reject
+unencrypted simple binds. Changing the server resets the protocol to verified
+LDAPS. Profiles are saved in `~/.config/ad-directory/connections.json`
+(`%USERPROFILE%\.config\ad-directory` on Windows), without passwords.
 
 An existing `connection.json` is available in the dialog as **Imported
 connection**. Leave the password blank to try its previously stored password.
@@ -50,22 +73,6 @@ connection flags remain available and bypass the dialog; they continue to use
 the old single connection settings.
 Press `Ctrl+O` in the browser to reopen the dialog. Quitting the dialog returns
 to the current directory; connecting to another profile opens its domain root.
-
-### Windows
-
-Use Windows Credential Manager instead of a plaintext password file. For a new
-Windows virtual environment, run in PowerShell:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe ad_user_ldap.py
-```
-
-Passwords are stored through the native Windows Credential Manager backend for
-the logged-in Windows user. `keyring` installs its Windows support dependency
-automatically. Connection and Common/Other preferences persist in
-`%USERPROFILE%\.config\ad-directory`. Settings files contain no passwords.
 
 ## Browse
 
@@ -195,6 +202,8 @@ Computers can be found by name, DNS hostname, or their full `sAMAccountName`
 
 Replace `Office` with a saved profile name. `--connection` bypasses the dialog;
 omit `--use-stored-credentials` to prompt for a password instead.
+For legacy command-line server settings, `--ldap` selects unencrypted LDAP
+for that invocation only; named profiles use their saved protocol instead.
 Redirected output automatically uses JSON even without `--json`. A target user,
 group, or computer is required for JSON output. Binary values are represented as objects
 with `encoding: "base64"` and a `value` field.

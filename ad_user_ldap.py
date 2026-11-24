@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Browse AD users, groups, and computers over LDAPS."""
+"""Browse AD users, groups, and computers over LDAP or LDAPS."""
 
 import argparse
 import base64
@@ -122,11 +122,14 @@ def save_stored_password(user):
     return store_password(user, bind_password(None, user))
 
 
-def open_directory(user, server, verified, password, target):
+def open_directory(user, server, verified, password, target, use_ssl=True):
     connection = None
     try:
-        tls = Tls(validate=ssl.CERT_REQUIRED if verified else ssl.CERT_NONE)
-        ldap_server = Server(server, port=636, use_ssl=True, tls=tls, get_info=NONE, connect_timeout=15)
+        if use_ssl:
+            tls = Tls(validate=ssl.CERT_REQUIRED if verified else ssl.CERT_NONE)
+            ldap_server = Server(server, port=636, use_ssl=True, tls=tls, get_info=NONE, connect_timeout=15)
+        else:
+            ldap_server = Server(server, port=389, use_ssl=False, get_info=NONE, connect_timeout=15)
         connection = Connection(
             ldap_server, user=user, password=password, raise_exceptions=True, check_names=False,
             auto_referrals=False, auto_range=True, receive_timeout=30,
@@ -147,7 +150,8 @@ def connection_dialog(target=None):
 
     return ConnectionApp(
         lambda profile, password: open_directory(
-            profile["bind_user"], profile["server"], profile["tls_verified"], password, target
+            profile["bind_user"], profile["server"], profile["tls_verified"], password, target,
+            use_ssl=profile.get("use_ssl", True),
         ),
         stored_password, store_password, forget_password,
     ).run()
@@ -189,7 +193,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--server",
-        help="Legacy LDAPS server setting (port 636); bypasses the connection dialog.",
+        help="Legacy LDAP server setting; bypasses the connection dialog.",
     )
     parser.add_argument(
         "--bind-user",
@@ -204,6 +208,10 @@ def main():
     tls_options.add_argument(
         "--tls-unverified", dest="tls_verified", action="store_false",
         help="Disable certificate and hostname verification for this server; save this unsafe choice.",
+    )
+    tls_options.add_argument(
+        "--ldap", action="store_true",
+        help="Use unencrypted LDAP on port 389 for this run; passwords and data are sent in plaintext.",
     )
     parser.add_argument("user", nargs="?", help="User account, UPN or full name, group name, or computer name/DNS name; omit to browse the domain")
     parser.add_argument(
@@ -235,8 +243,10 @@ def main():
         parser.error("a user, group, or computer is required for JSON output")
     if args.save_credentials and args.user:
         parser.error("--save-credentials does not take a lookup target")
-    if args.connection and any((args.server is not None, args.bind_user is not None, args.tls_verified is not None)):
-        parser.error("--connection cannot be combined with --server, --bind-user, or TLS flags")
+    if args.connection and any((args.server is not None, args.bind_user is not None, args.tls_verified is not None, args.ldap)):
+        parser.error("--connection cannot be combined with --server, --bind-user, or transport flags")
+    if args.ldap and args.save_credentials:
+        parser.error("--ldap applies only to a connection, not --save-credentials")
 
     connection = None
     directory = None
@@ -244,13 +254,13 @@ def main():
         explicit_connection = any((
             args.bind_user is not None, args.server is not None, args.tls_verified is not None,
             args.password_file is not None, args.use_stored_credentials, args.save_credentials,
-            args.connection is not None,
+            args.connection is not None, args.ldap,
         ))
         if interactive and not explicit_connection:
             selected = connection_dialog(args.user)
             if selected is None:
                 return 0
-            connection, directory, result, tls_verified = selected
+            connection, directory, result, tls_verified, use_ssl = selected
         else:
             credential_key = None
             if args.connection:
@@ -262,11 +272,13 @@ def main():
                     profile["bind_user"], profile["server"], profile["tls_verified"]
                 )
                 credential_key = profile["credential_key"]
+                use_ssl = profile.get("use_ssl", True)
             else:
                 bind_user, ldap_server, tls_verified = resolve_connection_settings(
                     args.bind_user, args.server, require_server=not args.save_credentials,
                     tls_verified=args.tls_verified,
                 )
+                use_ssl = not args.ldap
             if args.save_credentials:
                 label = (
                     store_password(bind_user, bind_password(None, bind_user), credential_key)
@@ -292,10 +304,12 @@ def main():
                     save_profiles(profiles, selected_profile)
             else:
                 password = bind_password(args.password_file, bind_user)
-            if not tls_verified:
+            if not use_ssl:
+                print("Warning: LDAP is unencrypted; passwords and directory data are sent in plaintext.", file=sys.stderr)
+            elif not tls_verified:
                 print("Warning: TLS certificate and hostname verification are disabled.", file=sys.stderr)
             connection, directory, result = open_directory(
-                bind_user, ldap_server, tls_verified, password, args.user,
+                bind_user, ldap_server, tls_verified, password, args.user, use_ssl=use_ssl,
             )
         if not interactive:
             print(json.dumps(result, indent=2, ensure_ascii=False, default=json_value))
@@ -304,7 +318,7 @@ def main():
 
             history = None
             while True:
-                app = ADUserApp(result, json_value, directory, tls_verified=tls_verified)
+                app = ADUserApp(result, json_value, directory, tls_verified=tls_verified, use_ssl=use_ssl)
                 if history is not None:
                     app.history, app.history_index = history
                 if app.run() != "connections":
@@ -314,14 +328,14 @@ def main():
                 selected = connection_dialog()
                 if selected is None:
                     continue
-                new_connection, new_directory, new_result, new_tls_verified = selected
+                new_connection, new_directory, new_result, new_tls_verified, new_use_ssl = selected
                 try:
                     directory.close()
                 except (LDAPException, OSError, RuntimeError):
                     new_directory.close()
                     raise
-                connection, directory, result, tls_verified = (
-                    new_connection, new_directory, new_result, new_tls_verified
+                connection, directory, result, tls_verified, use_ssl = (
+                    new_connection, new_directory, new_result, new_tls_verified, new_use_ssl
                 )
                 history = None
         return 0

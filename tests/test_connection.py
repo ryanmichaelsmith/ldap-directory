@@ -51,11 +51,13 @@ class ConnectionSettingsTests(unittest.TestCase):
         self.assertTrue(cli.resolve_connection_settings(None, "new.example.com")[2])
 
     def test_tls_flags_are_mutually_exclusive(self):
-        with patch("sys.argv", ["ad_user_ldap.py", "--tls-verified", "--tls-unverified"]), \
-             contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as result:
-                cli.main()
-            self.assertEqual(result.exception.code, 2)
+        for flags in (("--tls-verified", "--tls-unverified"), ("--ldap", "--tls-unverified")):
+            with self.subTest(flags=flags), \
+                 patch("sys.argv", ["ad_user_ldap.py", *flags]), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as result:
+                    cli.main()
+                self.assertEqual(result.exception.code, 2)
 
     def test_cli_wires_tls_and_does_not_leak_warning_into_json(self):
         connection = Mock(bound=True)
@@ -67,15 +69,39 @@ class ConnectionSettingsTests(unittest.TestCase):
                  patch("sys.argv", ["ad_user_ldap.py", "user", "--json", "--server", "dc.example.com",
                                     "--bind-user", "user", flag]), \
                  patch.object(cli, "bind_password", return_value="not-a-real-password"), \
-                 patch.object(cli, "Tls") as tls, patch.object(cli, "Server"), \
+                 patch.object(cli, "Tls") as tls, patch.object(cli, "Server") as server, \
                  patch.object(cli, "Connection", return_value=connection), \
                  patch.object(cli, "ADDirectory", return_value=directory), \
                  contextlib.redirect_stdout(io.StringIO()) as stdout, \
                  contextlib.redirect_stderr(io.StringIO()) as stderr:
                 self.assertEqual(cli.main(), 0)
                 self.assertEqual(tls.call_args.kwargs["validate"], expected)
+                self.assertEqual(server.call_args.kwargs["port"], 636)
+                self.assertTrue(server.call_args.kwargs["use_ssl"])
                 self.assertEqual(json.loads(stdout.getvalue())["dn"], "CN=User,DC=example")
                 self.assertEqual("Warning:" in stderr.getvalue(), flag == "--tls-unverified")
+
+    def test_unencrypted_ldap_uses_port_389_and_warns_without_polluting_json(self):
+        connection = Mock(bound=True)
+        connection.bind.return_value = True
+        directory = Mock()
+        directory.lookup.return_value = {"dn": "CN=User,DC=example", "attributes": {}}
+        with patch("sys.argv", ["ad_user_ldap.py", "user", "--json", "--server", "dc.example.com",
+                                "--bind-user", "user", "--ldap"]), \
+             patch.object(cli, "bind_password", return_value="not-a-real-password"), \
+             patch.object(cli, "Tls") as tls, patch.object(cli, "Server") as server, \
+             patch.object(cli, "Connection", return_value=connection), \
+             patch.object(cli, "ADDirectory", return_value=directory), \
+             contextlib.redirect_stdout(io.StringIO()) as stdout, \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(cli.main(), 0)
+        tls.assert_not_called()
+        self.assertEqual(server.call_args.kwargs["port"], 389)
+        self.assertFalse(server.call_args.kwargs["use_ssl"])
+        self.assertNotIn("tls", server.call_args.kwargs)
+        self.assertEqual(json.loads(stdout.getvalue())["dn"], "CN=User,DC=example")
+        self.assertIn("unencrypted", stderr.getvalue())
+        self.assertNotIn("use_ssl", json.loads(self.path.read_text()))
 
 
 if __name__ == "__main__":

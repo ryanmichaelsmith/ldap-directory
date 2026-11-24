@@ -99,6 +99,12 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.query_one("#directory", Tree).cursor_node.data.dn, BASE)
             self.assertIn("validation ON", str(app.query_one("#status", Static).render()))
 
+    async def test_unencrypted_connection_is_visible_in_browser_status(self):
+        app = ADUserApp(self.record, str, FakeDirectory(), preferences_path=self.path, use_ssl=False)
+        async with app.run_test() as pilot:
+            await self.settle(app, pilot)
+            self.assertIn("LDAP UNENCRYPTED", str(app.query_one("#status", Static).render()))
+
     async def test_connection_shortcut_returns_to_connection_dialog(self):
         app = ADUserApp(self.record, str, FakeDirectory(), preferences_path=self.path)
         async with app.run_test() as pilot:

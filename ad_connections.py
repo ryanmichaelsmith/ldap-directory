@@ -66,7 +66,7 @@ def load_profiles(path=PROFILES_PATH, legacy_path=LEGACY_PATH):
         if not isinstance(verified, bool):
             raise RuntimeError("Invalid connection settings: tls_verified must be true or false.")
         return {"Imported connection": {
-            "server": server, "bind_user": user, "tls_verified": verified,
+            "server": server, "bind_user": user, "tls_verified": verified, "use_ssl": True,
             "credential_key": new_credential_key(), "legacy_credential_key": user,
             "password_stored": False,
         }}, "Imported connection"
@@ -84,6 +84,7 @@ def load_profiles(path=PROFILES_PATH, legacy_path=LEGACY_PATH):
         validate_bind_user(profile.get("bind_user"))
         if (
             not isinstance(profile.get("tls_verified"), bool)
+            or not isinstance(profile.get("use_ssl", True), bool)
             or not isinstance(profile.get("password_stored"), bool)
             or not isinstance(profile.get("credential_key"), str)
             or not profile["credential_key"]

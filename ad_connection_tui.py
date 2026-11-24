@@ -98,11 +98,15 @@ class ConnectionApp(App):
             with Horizontal(classes="field"):
                 yield Static("Bind user")
                 yield Input(value=profile.get("bind_user", ""), placeholder=r"DOMAIN\account or UPN", id="bind-user")
+            with Horizontal(classes="field"):
+                yield Static("Protocol")
+                yield Select(
+                    [("LDAPS (TLS, port 636)", "ldaps"), ("LDAP (no TLS, port 389)", "ldap")],
+                    value="ldaps" if profile.get("use_ssl", True) else "ldap",
+                    allow_blank=False, id="transport",
+                )
             yield Checkbox("Verify TLS certificate and hostname", value=profile.get("tls_verified", True), id="verified")
-            yield Static(
-                "" if profile.get("tls_verified", True) else "Warning: server identity is not verified.",
-                id="tls-warning",
-            )
+            yield Static("", id="tls-warning", markup=False)
             with Horizontal(classes="field"):
                 yield Static("Password")
                 yield Input(password=True, placeholder="Enter password", id="password")
@@ -123,6 +127,7 @@ class ConnectionApp(App):
 
     def on_mount(self):
         self.query_one("#connection-form", VerticalScroll).border_title = "Connections"
+        self.update_transport()
         self.update_password_info()
         self.query_one("#profiles" if self.selected else "#name").focus()
 
@@ -139,22 +144,27 @@ class ConnectionApp(App):
         self.query_one("#name", Input).value = name
         self.query_one("#server", Input).value = profile.get("server", "")
         self.query_one("#bind-user", Input).value = profile.get("bind_user", "")
+        self.query_one("#transport", Select).value = "ldaps" if profile.get("use_ssl", True) else "ldap"
         self.query_one("#verified", Checkbox).value = profile.get("tls_verified", True)
         self.query_one("#password", Input).value = ""
         self.query_one("#remember", Checkbox).value = False
         self.update_password_info()
+        self.update_transport()
         self.status("")
 
     def on_select_changed(self, event: Select.Changed):
         if event.select.id == "profiles" and isinstance(event.value, str):
             if event.value == event.select.value and event.value != (self.selected or ""):
                 self.load_form(event.value)
+        elif event.select.id == "transport" and event.value == event.select.value:
+            self.update_transport()
 
     def on_input_changed(self, event: Input.Changed):
-        if event.input.id == "server":
+        if event.input.id == "server" and event.value == event.input.value:
             profile = self.profiles.get(self.selected, {})
             if profile and event.value.casefold() != profile["server"].casefold():
                 self.query_one("#verified", Checkbox).value = True
+                self.query_one("#transport", Select).value = "ldaps"
         if event.input.id in {"server", "bind-user", "password"}:
             self.update_password_info()
 
@@ -194,9 +204,17 @@ class ConnectionApp(App):
 
     def on_checkbox_changed(self, event: Checkbox.Changed):
         if event.checkbox.id == "verified":
-            self.query_one("#tls-warning", Static).update(
-                "" if event.value else "Warning: server identity is not verified."
-            )
+            self.update_transport()
+
+    def update_transport(self):
+        use_ssl = self.query_one("#transport", Select).value != "ldap"
+        verified = self.query_one("#verified", Checkbox)
+        verified.disabled = not use_ssl
+        warning = (
+            "Warning: LDAP is unencrypted; passwords and directory data are sent in plaintext."
+            if not use_ssl else "" if verified.value else "Warning: server identity is not verified."
+        )
+        self.query_one("#tls-warning", Static).update(warning)
 
     def update_choices(self, selected):
         widget = self.query_one("#profiles", Select)
@@ -208,6 +226,10 @@ class ConnectionApp(App):
         server = validate_server(self.query_one("#server", Input).value)
         user = validate_bind_user(self.query_one("#bind-user", Input).value)
         verified = self.query_one("#verified", Checkbox).value
+        transport = self.query_one("#transport", Select).value
+        if transport not in {"ldaps", "ldap"}:
+            raise RuntimeError("Select an LDAP protocol.")
+        use_ssl = transport == "ldaps"
         password = self.query_one("#password", Input).value
         remember = self.query_one("#remember", Checkbox).value
         if any(existing.casefold() == name.casefold() and existing != self.selected for existing in self.profiles):
@@ -240,7 +262,7 @@ class ConnectionApp(App):
             stored = True
             legacy_key = None
         profile = {
-            "server": server, "bind_user": user, "tls_verified": verified,
+            "server": server, "bind_user": user, "tls_verified": verified, "use_ssl": use_ssl,
             "credential_key": credential_key, "password_stored": stored,
         }
         if legacy_key:
@@ -261,19 +283,15 @@ class ConnectionApp(App):
         button = event.button.id
         if button == "quit":
             self.action_quit()
+        elif button == "connect" and self.query_one("#transport", Select).value == "ldap":
+            self.push_screen(
+                ConfirmDialog(
+                    "Unencrypted LDAP sends your password and directory data in plaintext. Connect anyway?"
+                ),
+                lambda confirmed: self.submit_connection("connect") if confirmed else None,
+            )
         elif button in {"save", "connect"}:
-            try:
-                remembering = self.query_one("#remember", Checkbox).value
-                profile, source, password = self.save_form(connecting=button == "connect")
-                if button == "connect":
-                    self.connect_profile(profile, source, password)
-                else:
-                    self.status(
-                        "Connection and password saved." if remembering else
-                        "Connection saved; entered password not saved." if password else "Connection saved."
-                    )
-            except (OSError, RuntimeError, ValueError) as error:
-                self.status(str(error))
+            self.submit_connection(button)
         elif button in {"delete", "forget"}:
             if not self.selected:
                 self.status("Select a saved connection first.")
@@ -287,6 +305,20 @@ class ConnectionApp(App):
                 )
             )
             self.push_screen(ConfirmDialog(message), lambda confirmed: self.confirm_action(button, confirmed))
+
+    def submit_connection(self, button):
+        try:
+            remembering = self.query_one("#remember", Checkbox).value
+            profile, source, password = self.save_form(connecting=button == "connect")
+            if button == "connect":
+                self.connect_profile(profile, source, password)
+            else:
+                self.status(
+                    "Connection and password saved." if remembering else
+                    "Connection saved; entered password not saved." if password else "Connection saved."
+                )
+        except (OSError, RuntimeError, ValueError) as error:
+            self.status(str(error))
 
     def confirm_action(self, action, confirmed):
         if not confirmed:
@@ -316,6 +348,7 @@ class ConnectionApp(App):
         for button in self.query(Button):
             button.disabled = True
         self.status(
+            "Connecting with unencrypted LDAP..." if not profile["use_ssl"] else
             "Connecting with TLS verification disabled..." if not profile["tls_verified"] else "Connecting..."
         )
         try:
@@ -324,7 +357,7 @@ class ConnectionApp(App):
                     self.get_password, profile["bind_user"], profile["credential_key"]
                 )
             connection, directory, record = await asyncio.to_thread(self.connect, profile, password)
-            self.exit((connection, directory, record, profile["tls_verified"]))
+            self.exit((connection, directory, record, profile["tls_verified"], profile["use_ssl"]))
         except (LDAPException, OSError, RuntimeError, ValueError) as error:
             self.status(f"Connection failed: {error}")
         finally:
