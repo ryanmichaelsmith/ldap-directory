@@ -388,6 +388,24 @@ class ConnectionDialogTests(unittest.IsolatedAsyncioTestCase):
             current = self.app.query_one("#profiles", Select).query_one("SelectCurrent")
             self.assertGreaterEqual(current.content_region.width, len("Imported connection"))
 
+    async def test_macos_terminal_uses_solid_field_borders(self):
+        for program, expected in (("Apple_Terminal", "solid"), ("ghostty", "tall")):
+            with self.subTest(program=program), patch.dict("os.environ", {"TERM_PROGRAM": program}):
+                app = ConnectionApp(self.connect, lambda *args: None, lambda *args: None,
+                                    lambda *args: None, profiles_path=self.path, legacy_path=self.legacy)
+                async with app.run_test(size=(80, 24)) as pilot:
+                    for widget_id in ("name", "profiles", "verified"):
+                        widget = app.query_one(f"#{widget_id}")
+                        widget.focus()
+                        await pilot.pause()
+                        target = widget.query_one("SelectCurrent") if isinstance(widget, Select) else widget
+                        self.assertEqual(target.styles.border_top[0], expected)
+                        focused_color = target.styles.border_top[1]
+                        app.query_one("#password", Input).focus()
+                        await pilot.pause()
+                        self.assertEqual(target.styles.border_top[0], expected)
+                        self.assertNotEqual(target.styles.border_top[1], focused_color)
+
 
 if __name__ == "__main__":
     unittest.main()

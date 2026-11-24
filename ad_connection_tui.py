@@ -1,6 +1,7 @@
 """Startup connection profile editor."""
 
 import asyncio
+import os
 
 from ldap3.core.exceptions import LDAPException
 from textual import work
@@ -56,6 +57,10 @@ class ConnectionApp(App):
     #connection-status { height: auto; min-height: 1; color: $warning; }
     #connection-buttons { height: auto; }
     #connection-buttons Button { margin-right: 1; min-width: 0; width: auto; }
+    Screen.macos-terminal Input, Screen.macos-terminal SelectCurrent,
+    Screen.macos-terminal Checkbox { border: solid $border-blurred; }
+    Screen.macos-terminal Input:focus, Screen.macos-terminal Select:focus > SelectCurrent,
+    Screen.macos-terminal Checkbox:focus { border: solid $border; }
     """
     BINDINGS = [
         Binding("escape", "quit", "Quit"),
@@ -126,6 +131,8 @@ class ConnectionApp(App):
         self.query_one("#connection-status", Static).update(message)
 
     def on_mount(self):
+        if os.environ.get("TERM_PROGRAM") == "Apple_Terminal":
+            self.screen.add_class("macos-terminal")
         self.query_one("#connection-form", VerticalScroll).border_title = "Connections"
         self.update_transport()
         self.update_password_info()
